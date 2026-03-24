@@ -2,3 +2,5 @@ streamlit
 pandas
 duckdb
 plotly
+utils
+st-gsheets-connection
