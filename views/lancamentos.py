@@ -1,10 +1,14 @@
 import streamlit as st
 import pandas as pd
-from database import executar_query, ler_dados
+from database import executar_query, ler_dados, carregar_dados
+import uuid
 
 
 def render_lancamentos():
     st.header("📝 Gestão de Lançamentos")
+
+    # Recupera o usuário logado na sessão
+    usuario_atual = st.session_state.get('username')
 
     df_contas = ler_dados("cad_contas")
     df_cats = ler_dados("cad_categorias")
@@ -15,127 +19,212 @@ def render_lancamentos():
 
     pode_editar = st.session_state.get('role') in ["Administrador", "Consegue Ler e Lançamentos"]
 
-    # Exibe o form de cadastro apenas se tiver permissão
+    # --- SEÇÃO 1: CADASTRO DE NOVO LANÇAMENTO ---
     if pode_editar:
-        with st.expander("➕ Novo Lançamento Detalhado", expanded=True):
-            st.markdown("### 1. Classificação")
+        with st.expander("➕ Novo Lançamento", expanded=True):
+            st.markdown("### 1. Tipo de Operação")
+            tipo = st.radio("Selecione o tipo de movimentação:", ["Gasto", "Ganho", "Transferência"], horizontal=True)
+
+            st.markdown("### 2. Classificação e Detalhes")
             c1, c2, c3 = st.columns(3)
 
-            with c1:
-                grupo_sel = st.selectbox("Grupo", sorted(df_cats['grupo'].unique()))
-            with c2:
-                sub_opts = df_cats[df_cats['grupo'] == grupo_sel]['subgrupo'].unique()
-                subgrupo_sel = st.selectbox("Subgrupo", sorted(sub_opts))
-            with c3:
-                subcat_opts = df_cats[(df_cats['grupo'] == grupo_sel) &
-                                      (df_cats['subgrupo'] == subgrupo_sel)]['subcategoria'].unique()
-                subcat_sel = st.selectbox("Sub-Categoria", sorted(subcat_opts))
+            usar_split = False
+            if tipo != "Transferência":
+                with c1:
+                    grupo_sel = st.selectbox("Grupo", sorted(df_cats['grupo'].unique()), key="new_grupo")
+                with c2:
+                    sub_opts = df_cats[df_cats['grupo'] == grupo_sel]['subgrupo'].unique()
+                    subgrupo_sel = st.selectbox("Subgrupo", sorted(sub_opts), key="new_subgrupo")
+                with c3:
+                    subcat_opts = df_cats[(df_cats['grupo'] == grupo_sel) & (df_cats['subgrupo'] == subgrupo_sel)][
+                        'subcategoria'].unique()
 
-            st.markdown("### 2. Detalhes Financeiros")
-            with st.form("form_registro", clear_on_submit=True):
-                col_v, col_t, col_c = st.columns(3)
-                valor = col_v.number_input("Valor (R$)", min_value=0.0, format="%.2f")
-                tipo = col_t.radio("Tipo", ["Gasto", "Ganho"], horizontal=True)
-                conta = col_c.selectbox("Conta", df_contas['nome'].unique())
+                    # Lógica de Desmembramento (Split) recuperada do backup
+                    permitir_split = False
+                    if 'permite_split' in df_cats.columns:
+                        permitir_split = df_cats[(df_cats['grupo'] == grupo_sel) &
+                                                 (df_cats['subgrupo'] == subgrupo_sel)]['permite_split'].any()
 
-                data = st.date_input("Data")
-                descricao = st.text_input("Descrição (Ex: Compras semanais)")
+                    if permitir_split:
+                        usar_split = st.toggle("🧩 Desmembrar valor por subcategorias?",
+                                               help="Ative para distribuir o valor total")
 
-                if st.form_submit_button("Confirmar Lançamento"):
-                    if valor > 0:
-                        valor_f = -valor if tipo == "Gasto" else valor
-                        executar_query("""
-                            INSERT INTO transacoes (valor, tipo, grupo, subgrupo, subcategoria, conta, data, pago, recorrente, descricao)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (valor_f, tipo, grupo_sel, subgrupo_sel, subcat_sel, conta, data, True, False, descricao))
-                        st.success("Lançamento realizado!")
-                        st.rerun()
+                    if not usar_split:
+                        subcat_sel = st.selectbox("Subcategoria", sorted(subcat_opts), key="new_subcat")
+            else:
+                subcat_sel = "Transferência"
+                grupo_sel = "Transferência"
+                subgrupo_sel = "Transferência"
+                st.info("💡 Use 'Transferência' para Cofrinho, Aplicações ou movimentação entre contas.")
+
+            st.divider()
+
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                valor_total = st.number_input("Valor Total (R$)", min_value=0.0, step=0.01, format="%.2f",
+                                              key="new_valor")
+            with d2:
+                data_lanc = st.date_input("Data", value=pd.Timestamp.now(), key="new_data")
+            with d3:
+                conta_sel = st.selectbox("Conta / Cartão (Origem)", sorted(df_contas['nome'].unique()), key="new_conta")
+
+            desc = st.text_input("Descrição (Opcional)", key="new_desc")
+
+            if tipo == "Transferência":
+                conta_dest = st.selectbox("Conta de Destino", sorted(df_contas['nome'].unique()), key="new_conta_dest")
+
+            # --- PROCESSAMENTO DO BOTÃO SALVAR ---
+
+            # Caso A: Desmembramento (Split)
+            if usar_split:
+                st.info("Distribua o valor total abaixo:")
+                df_split_data = pd.DataFrame({'Subcategoria': sorted(subcat_opts), 'Valor (R$)': 0.0})
+                res_editor = st.data_editor(df_split_data, width='stretch', hide_index=True, key="editor_split")
+
+                soma_atual = res_editor['Valor (R$)'].sum()
+                diferenca = valor_total - soma_atual
+                st.write(f"Soma: **R$ {soma_atual:.2f}** | Restante: **R$ {diferenca:.2f}**")
+
+                if st.button("🚀 Confirmar Lançamento Desmembrado", type="primary"):
+                    if abs(diferenca) > 0.01:
+                        st.error("A soma das subcategorias não bate com o valor total.")
+                    elif valor_total <= 0:
+                        st.error("O valor deve ser maior que zero.")
+                    else:
+                        try:
+                            id_agrupador = str(uuid.uuid4())[:8]
+                            for _, row in res_editor.iterrows():
+                                if row['Valor (R$)'] > 0:
+                                    v_f = -row['Valor (R$)'] if tipo == "Gasto" else row['Valor (R$)']
+                                    # ADICIONADO: username na query e nos parâmetros
+                                    executar_query("""
+                                            INSERT INTO transacoes (valor, tipo, grupo, subgrupo, subcategoria, conta, data, descricao, id_agrupador, username)
+                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        """, (v_f, tipo, grupo_sel, subgrupo_sel, row['Subcategoria'], conta_sel,
+                                              data_lanc, f"{desc} [{row['Subcategoria']}]", id_agrupador,
+                                              usuario_atual))
+                            st.success("Nota desmembrada com sucesso!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao salvar split: {e}")
+
+            # Caso B: Lançamento Simples ou Transferência
+            else:
+                if st.button("🚀 Confirmar Lançamento", type="primary"):
+                    if valor_total > 0:
+                        try:
+                            if tipo == "Transferência":
+                                id_transf = str(uuid.uuid4())
+                                # Saída
+                                executar_query("""
+                                        INSERT INTO transacoes (valor, tipo, grupo, subgrupo, subcategoria, conta, data, descricao, id_agrupador, username)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (-valor_total, "Transferência", "Transferência", "Transferência", "Saída",
+                                          conta_sel,
+                                          data_lanc, f"TR: {desc}", id_transf, usuario_atual))
+                                # Entrada
+                                executar_query("""
+                                        INSERT INTO transacoes (valor, tipo, grupo, subgrupo, subcategoria, conta, data, descricao, id_agrupador, username)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (valor_total, "Transferência", "Transferência", "Transferência", "Entrada",
+                                          conta_dest,
+                                          data_lanc, f"TR: {desc}", id_transf, usuario_atual))
+                                st.success("Transferência realizada!")
+                            else:
+                                valor_final = -valor_total if tipo == "Gasto" else valor_total
+                                executar_query("""
+                                        INSERT INTO transacoes (valor, tipo, grupo, subgrupo, subcategoria, conta, data, descricao, username)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """, (valor_final, tipo, grupo_sel, subgrupo_sel, subcat_sel, conta_sel, data_lanc,
+                                          desc, usuario_atual))
+                                st.success("Lançamento registrado!")
+
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao salvar: {e}")
                     else:
                         st.error("O valor deve ser maior que zero.")
-        st.divider()
-    else:
-        st.info("🔒 Seu nível de acesso permite apenas visualização dos lançamentos.")
 
-    # Visualização da Tabela
-    st.subheader("📋 Histórico")
-    df_trans = ler_dados("transacoes")
+    # --- SEÇÃO 2: VISUALIZAÇÃO E EDIÇÃO ---
+    st.divider()
+    st.subheader("🔍 Lançamentos Recentes")
 
-    if not df_trans.empty:
-        df_view = df_trans[['id', 'data', 'descricao', 'valor', 'tipo', 'conta', 'grupo', 'subcategoria']].sort_values(
-            'data', ascending=False)
-        st.dataframe(df_view, width='stretch', hide_index=True)
+    # Carregando dados filtrados pelo usuário logado (Passo 1 do banco de dados)
+    df_lista = carregar_dados(username=usuario_atual)
 
-        # Exibe edição/exclusão apenas se tiver permissão
-        if pode_editar:
-            with st.expander("✏️ Editar ou 🗑️ Excluir Lançamento Existente"):
-                df_trans['label'] = df_trans['id'].astype(str) + " | " + df_trans['data'].astype(str) + " | " + \
-                                    df_trans['descricao'] + " | R$ " + df_trans['valor'].astype(str)
-                trans_sel_label = st.selectbox("Selecione o Lançamento para Alterar", df_trans['label'].tolist(),
-                                               key="sel_trans_edit")
+    if not df_lista.empty:
+        # Preparação dos dados para exibição
+        df_display = df_lista.copy()
+        df_display['data'] = pd.to_datetime(df_display['data'])
+        df_display = df_display.sort_values(by='data', ascending=False)
 
-                if trans_sel_label:
-                    trans_id = int(trans_sel_label.split(" | ")[0])
-                    row = df_trans[df_trans['id'] == trans_id].iloc[0]
+        # Filtro de Mês/Ano (Preservado do seu código original)
+        df_display['mes_ano'] = df_display['data'].dt.strftime('%m/%Y')
+        meses_disp = sorted(df_display['mes_ano'].unique(), reverse=True)
+        mes_filtro = st.selectbox("Filtrar por Mês/Ano", ["Todos"] + meses_disp)
 
-                    st.markdown("#### Alterar Dados do Lançamento")
+        if mes_filtro != "Todos":
+            df_display = df_display[df_display['mes_ano'] == mes_filtro]
 
-                    grupos = sorted(df_cats['grupo'].unique())
-                    default_g = row['grupo'] if row['grupo'] in grupos else (grupos[0] if grupos else None)
-                    edit_g = st.selectbox("Grupo", grupos, index=grupos.index(default_g) if default_g else 0,
-                                          key="ed_g")
+        colunas_vistas = ['id', 'data', 'tipo', 'grupo', 'subcategoria', 'conta', 'valor', 'descricao']
+        st.dataframe(df_display[colunas_vistas], use_container_width=True, hide_index=True)
 
-                    subgrupos = sorted(df_cats[df_cats['grupo'] == edit_g]['subgrupo'].unique())
-                    default_sg = row['subgrupo'] if row['subgrupo'] in subgrupos else (
-                        subgrupos[0] if subgrupos else None)
-                    edit_sg = st.selectbox("Subgrupo", subgrupos,
-                                           index=subgrupos.index(default_sg) if default_sg else 0, key="ed_sg")
+        # --- BLOCO DE EDIÇÃO (Suas funções originais integradas com segurança de usuário) ---
+        with st.expander("🛠️ Editar ou Excluir Lançamento"):
+            st.write("Identifique o ID na tabela acima para realizar alterações.")
+            id_para_editar = st.number_input("Digite o ID do lançamento:", step=1, value=0)
 
-                    subcats = sorted(df_cats[(df_cats['grupo'] == edit_g) & (df_cats['subgrupo'] == edit_sg)][
-                                         'subcategoria'].unique())
-                    default_sc = row['subcategoria'] if row['subcategoria'] in subcats else (
-                        subcats[0] if subcats else None)
-                    edit_sc = st.selectbox("Sub-Categoria", subcats,
-                                           index=subcats.index(default_sc) if default_sc else 0, key="ed_sc")
+            if id_para_editar > 0:
+                # Segurança: Filtramos no DF que já pertence ao usuário
+                row_sel = df_lista[df_lista['id'] == id_para_editar]
 
-                    col_v, col_t, col_c = st.columns(3)
-                    val_absoluto = abs(float(row['valor']))
-                    edit_val = col_v.number_input("Valor (R$)", min_value=0.0, format="%.2f", value=val_absoluto,
-                                                  key="ed_val")
-                    edit_tipo = col_t.radio("Tipo", ["Gasto", "Ganho"], horizontal=True,
-                                            index=0 if row['tipo'] == "Gasto" else 1, key="ed_tipo")
+                if not row_sel.empty:
+                    row = row_sel.iloc[0]
+                    st.info(f"Editando registro: {row['tipo']} | Conta: {row['conta']} | Valor: R$ {row['valor']:.2f}")
 
-                    contas_list = df_contas['nome'].unique().tolist()
-                    edit_conta = col_c.selectbox("Conta", contas_list, index=contas_list.index(row['conta']) if row[
-                                                                                                                    'conta'] in contas_list else 0,
-                                                 key="ed_conta")
+                    with st.form("form_edicao_lanc"):
+                        c_ed1, c_ed2, c_ed3 = st.columns(3)
+                        nova_data_ed = c_ed1.date_input("Nova Data", value=pd.to_datetime(row['data']))
 
-                    try:
-                        data_val = pd.to_datetime(row['data']).date()
-                    except:
-                        data_val = pd.to_datetime('today').date()
+                        contas_lista = sorted(list(df_contas['nome'].unique()))
+                        idx_conta = contas_lista.index(row['conta']) if row['conta'] in contas_lista else 0
+                        nova_conta_ed = c_ed2.selectbox("Nova Conta", contas_lista, index=idx_conta)
 
-                    col_d, col_desc = st.columns([1, 2])
-                    edit_data = col_d.date_input("Data", value=data_val, key="ed_data")
-                    edit_desc = col_desc.text_input("Descrição", value=row['descricao'], key="ed_desc")
+                        novo_valor_ed = c_ed3.number_input("Novo Valor (R$)", value=abs(float(row['valor'])))
+                        nova_desc_ed = st.text_input("Nova Descrição",
+                                                     value=row['descricao'] if row['descricao'] else "")
 
-                    col_btn1, col_btn2 = st.columns(2)
-                    if col_btn1.button("💾 Atualizar Lançamento", type="primary"):
-                        if edit_val > 0:
-                            valor_f = -edit_val if edit_tipo == "Gasto" else edit_val
+                        col_btn1, col_btn2, _ = st.columns([1, 1, 2])
+
+                        if col_btn1.form_submit_button("💾 Salvar Alterações", type="primary"):
+                            # Lógica de sinais preservada
+                            if row['tipo'] == "Transferência":
+                                valor_final_ed = -novo_valor_ed if row['valor'] < 0 else novo_valor_ed
+                            else:
+                                valor_final_ed = -novo_valor_ed if row['tipo'] == "Gasto" else novo_valor_ed
+
                             executar_query("""
-                                UPDATE transacoes
-                                SET valor=?, tipo=?, grupo=?, subgrupo=?, subcategoria=?, conta=?, data=?, descricao=?
-                                WHERE id=?
-                            """, (valor_f, edit_tipo, edit_g, edit_sg, edit_sc, edit_conta, edit_data, edit_desc,
-                                  trans_id))
-                            st.success("Lançamento atualizado com sucesso!")
+                                UPDATE transacoes 
+                                SET valor=?, data=?, conta=?, descricao=?
+                                WHERE id=? AND username=?
+                            """, (valor_final_ed, nova_data_ed, nova_conta_ed, nova_desc_ed, id_para_editar,
+                                  usuario_atual))
+                            st.success("Registro atualizado com sucesso!")
                             st.rerun()
-                        else:
-                            st.error("O valor deve ser maior que zero.")
 
-                    if col_btn2.button("🗑️ Excluir Lançamento"):
-                        executar_query("DELETE FROM transacoes WHERE id=?", (trans_id,))
-                        st.success("Lançamento apagado!")
-                        st.rerun()
+                        if col_btn2.form_submit_button("🗑️ Excluir"):
+                            if row['id_agrupador']:
+                                # Exclui o par (split ou transferência) apenas do usuário logado
+                                executar_query("DELETE FROM transacoes WHERE id_agrupador=? AND username=?",
+                                               (row['id_agrupador'], usuario_atual))
+                                st.warning("Grupo de lançamentos excluído!")
+                            else:
+                                executar_query("DELETE FROM transacoes WHERE id=? AND username=?",
+                                               (id_para_editar, usuario_atual))
+                                st.warning("Lançamento excluído!")
+                            st.rerun()
+                else:
+                    st.error("Erro: Lançamento não encontrado ou não pertence ao seu utilizador.")
     else:
-        st.info("Nenhum lançamento registrado ainda.")
+        st.info(
+            f"Olá {usuario_atual}, não encontramos lançamentos para a sua conta. Use o formulário acima para começar!")

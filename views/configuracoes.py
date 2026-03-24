@@ -1,188 +1,268 @@
 import streamlit as st
 import pandas as pd
 from database import executar_query, ler_dados
+from views.investimentos import inicializar_banco_investimentos
 
 
 def render_configuracoes():
-    if st.session_state.get('role') != 'Administrador':
-        st.error("🚫 Acesso negado. Apenas administradores podem acessar esta página.")
-        return
+    inicializar_banco_investimentos()
 
-    st.header("⚙️ Configurações do Sistema")
-    # NOVA ABA ADICIONADA: Gerenciar Usuários
-    tab_contas, tab_cats, tab_usuarios = st.tabs(
-        ["💳 Contas e Cartões", "📁 Hierarquia de Categorias", "👥 Gerenciar Usuários"])
+    usuario_atual = st.session_state.get('username')
+    regra_usuario = st.session_state.get('role')
 
+    st.header("⚙️ Configurações e Gestão")
+
+    # Criamos as 4 abas
+    tab_contas, tab_cats, tab_usuarios, tab_invest = st.tabs([
+        "💳 Contas e Cartões",
+        "📁 Hierarquia de Categorias",
+        "👥 Gerenciar Usuários",
+        "📈 Gestão de Investimentos"  # <-- Nova aba
+    ])
+
+    # --- ABA 1: CONTAS E CARTÕES ---
+    # --- ABA 1: CONTAS E CARTÕES ---
     with tab_contas:
-        st.subheader("Nova Conta")
-        with st.form("form_conta", clear_on_submit=True):
-            c1, c2, c3 = st.columns(3)
-            nome_c = c1.text_input("Nome da Conta")
-            tipo_c = c2.selectbox("Tipo", ["Conta Corrente", "Cartão", "Dinheiro"])
-            venc = c3.text_input("Vencimento (Ex: dia 05)")
-            if st.form_submit_button("Salvar Conta"):
-                if nome_c:
-                    executar_query("INSERT INTO cad_contas VALUES (?, ?, ?)", (nome_c.strip(), tipo_c, venc))
-                    st.success("Conta adicionada com sucesso!")
-                    st.rerun()
-                else:
-                    st.error("O nome da conta é obrigatório.")
+        if regra_usuario != 'Administrador':
+            st.warning("⚠️ Acesso Restrito: Apenas administradores podem gerenciar contas.")
+        else:
+            # Tudo que já existia antes agora fica indentado dentro do 'else'
+            st.subheader("Nova Conta")
+            with st.form("form_conta", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                nome_c = c1.text_input("Nome da Conta")
+                tipo_c = c2.selectbox("Tipo", ["Conta Corrente", "Cartão", "Dinheiro", "Investimento (Liquidez)",
+                                               "Patrimônio (Imóvel)"])
+                venc = c3.text_input("Vencimento (Ex: dia 05)")
 
-        st.divider()
-
-        st.subheader("Contas Cadastradas")
-        df_contas = ler_dados("cad_contas")
-        st.dataframe(df_contas, width='stretch', hide_index=True)
-
-        if not df_contas.empty:
-            with st.expander("✏️ Editar ou 🗑️ Excluir Conta"):
-                conta_sel = st.selectbox("Selecione a Conta para Modificar", df_contas['nome'].tolist(),
-                                         key="conta_sel_edit")
-                if conta_sel:
-                    row_conta = df_contas[df_contas['nome'] == conta_sel].iloc[0]
-                    with st.form("form_edit_conta"):
-                        c1, c2, c3 = st.columns(3)
-                        novo_nome = c1.text_input("Nome da Conta", value=row_conta['nome'])
-
-                        tipos_conta = ["Conta Corrente", "Cartão", "Dinheiro"]
-                        idx_tipo = tipos_conta.index(row_conta['tipo']) if row_conta['tipo'] in tipos_conta else 0
-                        novo_tipo = c2.selectbox("Tipo", tipos_conta, index=idx_tipo)
-
-                        venc_val = str(row_conta['vencimento']) if not pd.isna(row_conta['vencimento']) else ""
-                        novo_venc = c3.text_input("Vencimento", value=venc_val)
-
-                        col_btn1, col_btn2 = st.columns(2)
-                        if col_btn1.form_submit_button("💾 Salvar Alterações"):
-                            if novo_nome:
-                                executar_query("UPDATE cad_contas SET nome=?, tipo=?, vencimento=? WHERE nome=?",
-                                               (novo_nome.strip(), novo_tipo, novo_venc, row_conta['nome']))
-                                if novo_nome.strip() != row_conta['nome']:
-                                    executar_query("UPDATE transacoes SET conta=? WHERE conta=?",
-                                                   (novo_nome.strip(), row_conta['nome']))
-                                st.success("Conta atualizada!")
-                                st.rerun()
-
-                        if col_btn2.form_submit_button("🗑️ Excluir Conta"):
-                            executar_query("DELETE FROM cad_contas WHERE nome=?", (row_conta['nome'],))
-                            st.success("Conta excluída!")
-                            st.rerun()
-
-    with tab_cats:
-        st.subheader("Cadastrar Nova Divisão")
-        with st.form("form_hierarquia", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            g = col1.text_input("Grupo (Ex: Casa)")
-            sg = col2.text_input("Subgrupo (Ex: Mercado)")
-            sc = col3.text_input("Sub-Categoria (Ex: Limpeza)")
-
-            if st.form_submit_button("Adicionar Estrutura"):
-                if g and sg and sc:
-                    executar_query("INSERT OR IGNORE INTO cad_categorias VALUES (?, ?, ?)",
-                                   (g.strip(), sg.strip(), sc.strip()))
-                    st.success("Estrutura adicionada!")
-                    st.rerun()
-                else:
-                    st.error("Preencha todos os campos.")
-
-        st.divider()
-
-        df_cat = ler_dados("cad_categorias")
-        if not df_cat.empty:
-            st.subheader("Estrutura Atual")
-            st.dataframe(df_cat.sort_values(['grupo', 'subgrupo']), width='stretch', hide_index=True)
-
-            with st.expander("✏️ Editar ou 🗑️ Excluir Categoria"):
-                df_cat['nome_completo'] = df_cat['grupo'] + " > " + df_cat['subgrupo'] + " > " + df_cat['subcategoria']
-                cat_sel = st.selectbox("Selecione a Categoria", df_cat['nome_completo'].tolist(), key="cat_sel_edit")
-
-                if cat_sel:
-                    row_c = df_cat[df_cat['nome_completo'] == cat_sel].iloc[0]
-
-                    with st.form("form_edit_cat"):
-                        c1, c2, c3 = st.columns(3)
-                        novo_g = c1.text_input("Grupo", value=row_c['grupo'])
-                        novo_sg = c2.text_input("Subgrupo", value=row_c['subgrupo'])
-                        novo_sc = c3.text_input("Sub-Categoria", value=row_c['subcategoria'])
-
-                        col_btn1, col_btn2 = st.columns(2)
-                        if col_btn1.form_submit_button("💾 Salvar Alterações"):
-                            if novo_g and novo_sg and novo_sc:
-                                executar_query("""
-                                    UPDATE cad_categorias
-                                    SET grupo=?, subgrupo=?, subcategoria=?
-                                    WHERE grupo=? AND subgrupo=? AND subcategoria=?
-                                """, (novo_g.strip(), novo_sg.strip(), novo_sc.strip(), row_c['grupo'],
-                                      row_c['subgrupo'], row_c['subcategoria']))
-
-                                executar_query("""
-                                    UPDATE transacoes
-                                    SET grupo=?, subgrupo=?, subcategoria=?
-                                    WHERE grupo=? AND subgrupo=? AND subcategoria=?
-                                """, (novo_g.strip(), novo_sg.strip(), novo_sc.strip(), row_c['grupo'],
-                                      row_c['subgrupo'], row_c['subcategoria']))
-
-                                st.success("Categoria atualizada em todo o sistema!")
-                                st.rerun()
-
-                        if col_btn2.form_submit_button("🗑️ Excluir Categoria"):
-                            executar_query("""
-                                DELETE FROM cad_categorias
-                                WHERE grupo=? AND subgrupo=? AND subcategoria=?
-                            """, (row_c['grupo'], row_c['subgrupo'], row_c['subcategoria']))
-                            st.success("Categoria excluída!")
-                            st.rerun()
+                if st.form_submit_button("Salvar Conta"):
+                    if nome_c:
+                        executar_query("INSERT INTO cad_contas VALUES (?, ?, ?)", (nome_c.strip(), tipo_c, venc))
+                        st.success("Conta adicionada com sucesso!")
+                        st.rerun()
 
             st.divider()
-            if st.button("🗑️ Limpar todas as categorias", type="secondary"):
-                executar_query("DELETE FROM cad_categorias")
-                st.success("Todas as categorias foram removidas.")
-                st.rerun()
+            st.subheader("Contas Cadastradas")
+            df_contas = ler_dados("cad_contas")
+            if not df_contas.empty:
+                st.dataframe(df_contas, use_container_width=True, hide_index=True)
 
-    # --- NOVA ABA DE USUÁRIOS ---
-    with tab_usuarios:
-        st.subheader("Gerenciamento de Acessos")
-        df_users = ler_dados("usuarios")
+            with st.expander("🗑️ Excluir Conta"):
+                conta_excluir = st.selectbox("Selecione a conta para remover", df_contas['nome'].unique())
+                if st.button("Confirmar Exclusão de Conta"):
+                    executar_query("DELETE FROM cad_contas WHERE nome=?", (conta_excluir,))
+                    st.warning(f"Conta '{conta_excluir}' removida.")
+                    st.rerun()
 
-        if not df_users.empty:
-            # Exibe uma tabela simplificada sem a coluna de senha por segurança
-            df_display = df_users[['username', 'email', 'nivel', 'aprovado']].copy()
-            # Transforma o booleano em Sim/Não para ficar mais amigável
-            df_display['aprovado'] = df_display['aprovado'].apply(lambda x: "✅ Sim" if x else "⏳ Pendente")
-            st.dataframe(df_display, width='stretch', hide_index=True)
+        # --- ABA 2: HIERARQUIA DE CATEGORIAS ---
+        with tab_cats:
+            # 1. Colocamos a trava de segurança logo no início da aba
+            if regra_usuario != 'Administrador':
+                st.warning("⚠️ Acesso Restrito: Apenas administradores podem gerenciar a hierarquia de categorias.")
+            else:
+                # 2. Todo o seu código original fica indentado (para a direita) dentro do 'else'
+                st.subheader("Nova Categoria / Subcategoria")
+                with st.form("form_cat", clear_on_submit=True):
+                    col1, col2, col3 = st.columns(3)
+                    g = col1.text_input("Grupo (Ex: Essencial)")
+                    sg = col2.text_input("Subgrupo (Ex: Moradia)")
+                    sc = col3.text_input("Subcategoria (Ex: Aluguel)")
 
-            with st.expander("✏️ Aprovar, Editar ou 🗑️ Excluir Usuário", expanded=True):
-                user_sel = st.selectbox("Selecione o Usuário", df_users['username'].tolist())
-                if user_sel:
-                    row_user = df_users[df_users['username'] == user_sel].iloc[0]
+                    split = st.checkbox("Permitir Split (Divisão) nesta categoria?")
 
-                    with st.form("form_edit_user"):
-                        c1, c2 = st.columns(2)
-
-                        niveis = ["Somente Leitura", "Consegue Ler e Lançamentos", "Administrador"]
-                        idx_nivel = niveis.index(row_user['nivel']) if row_user['nivel'] in niveis else 0
-                        novo_nivel = c1.selectbox("Nível de Acesso", niveis, index=idx_nivel)
-
-                        novo_aprovado = c2.checkbox("Usuário Aprovado para Login?", value=bool(row_user['aprovado']))
-
-                        col_btn1, col_btn2 = st.columns(2)
-                        if col_btn1.form_submit_button("💾 Salvar Alterações"):
-                            executar_query("UPDATE usuarios SET nivel=?, aprovado=? WHERE username=?",
-                                           (novo_nivel, novo_aprovado, user_sel))
-
-                            # Alerta caso o admin remova o próprio acesso
-                            if user_sel == st.session_state.get('username') and not novo_aprovado:
-                                st.warning(
-                                    "Atenção: Você removeu sua própria aprovação. Seu acesso será bloqueado no próximo login.")
-
-                            st.success(f"Permissões do usuário '{user_sel}' atualizadas com sucesso!")
+                    if st.form_submit_button("Salvar Categoria"):
+                        if g and sg and sc:
+                            # Inserção global (sem username)
+                            executar_query("INSERT INTO cad_categorias VALUES (?, ?, ?, ?)",
+                                           (g.strip(), sg.strip(), sc.strip(), split))
+                            st.success("Hierarquia atualizada!")
                             st.rerun()
 
-                        if col_btn2.form_submit_button("🗑️ Excluir Usuário"):
-                            if user_sel == "admin" or user_sel == st.session_state.get('username'):
-                                st.error("Não é possível excluir o admin padrão ou o seu próprio usuário atual.")
-                            else:
-                                executar_query("DELETE FROM usuarios WHERE username=?", (user_sel,))
-                                st.success("Usuário excluído permanentemente!")
+                st.divider()
+                df_cats = ler_dados("cad_categorias")
+                if not df_cats.empty:
+                    st.write("### Hierarquia Atual")
+                    st.dataframe(df_cats, use_container_width=True, hide_index=True)
+
+                    with st.expander("🗑️ Remover Categoria"):
+                        # Lógica para criar identificador de exclusão
+                        df_cats['identificador'] = df_cats['grupo'] + " > " + df_cats['subgrupo'] + " > " + df_cats[
+                            'subcategoria']
+                        escolha = st.selectbox("Selecione para excluir", df_cats['identificador'].unique())
+
+                        if st.button("Excluir Categoria"):
+                            parts = escolha.split(" > ")
+                            executar_query("""
+                                DELETE FROM cad_categorias 
+                                WHERE grupo=? AND subgrupo=? AND subcategoria=?
+                            """, (parts[0], parts[1], parts[2]))
+                            st.warning("Categoria removida.")
+                            st.rerun()
+
+        # --- ABA 3: GERENCIAR USUÁRIOS ---
+        with tab_usuarios:
+            # 1. Trava de segurança no início da aba
+            if regra_usuario != 'Administrador':
+                st.warning("⚠️ Acesso Restrito: Apenas administradores podem gerenciar usuários e permissões.")
+            else:
+                # 2. Todo o seu código original de gestão de usuários fica aqui dentro (indentado)
+                st.subheader("👥 Gestão de Acessos")
+                df_users = ler_dados("usuarios")
+
+                if not df_users.empty:
+                    # Mostra a tabela de usuários (removendo a coluna de senha por segurança)
+                    df_view = df_users.drop(columns=['senha']) if 'senha' in df_users.columns else df_users
+                    st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+                    st.divider()
+                    st.write("### Aprovar ou Alterar Usuário")
+                    user_sel = st.selectbox("Selecione o usuário para gerenciar", df_users['username'].unique())
+
+                    if user_sel:
+                        # Localiza a linha do usuário selecionado
+                        row_user = df_users[df_users['username'] == user_sel].iloc[0]
+
+                        with st.form("form_edit_user"):
+                            col_u1, col_u2 = st.columns(2)
+
+                            opcoes_nivel = ["Administrador", "Consegue Ler e Lançamentos", "Apenas Leitura"]
+                            try:
+                                idx_atual = opcoes_nivel.index(row_user['nivel'])
+                            except:
+                                idx_atual = 1
+
+                            novo_nivel = col_u1.selectbox("Nível de Acesso", opcoes_nivel, index=idx_atual)
+                            novo_aprovado = col_u2.checkbox("Aprovado para Login?", value=bool(row_user['aprovado']))
+
+                            col_btn1, col_btn2 = st.columns(2)
+
+                            if col_btn1.form_submit_button("💾 Salvar Alterações"):
+                                executar_query("UPDATE usuarios SET nivel=?, aprovado=? WHERE username=?",
+                                               (novo_nivel, novo_aprovado, user_sel))
+
+                                if user_sel == st.session_state.get('username') and not novo_aprovado:
+                                    st.warning("Atenção: Você removeu sua própria aprovação.")
+
+                                st.success(f"Permissões do usuário '{user_sel}' atualizadas!")
                                 st.rerun()
-        else:
-            st.info("Nenhum usuário encontrado.")
+
+                            if col_btn2.form_submit_button("🗑️ Excluir Usuário"):
+                                if user_sel == "admin" or user_sel == st.session_state.get('username'):
+                                    st.error("Não é possível excluir o admin padrão ou o seu usuário atual.")
+                                else:
+                                    executar_query("DELETE FROM usuarios WHERE username=?", (user_sel,))
+                                    st.success("Usuário excluído!")
+                                    st.rerun()
+                else:
+                    st.info("Nenhum usuário encontrado.")
+
+            # --- ABA 4: GESTÃO DE INVESTIMENTOS (Livre para todos os usuários) ---
+            with tab_invest:
+                usuario_atual = st.session_state.get('username')
+                st.subheader(f"📊 Gestão de Investimentos - {usuario_atual}")
+
+                # Sub-abas internas para não poluir a tela
+                st_cad, st_trans, st_b3 = st.tabs(["🆕 Novo Ativo", "💸 Registrar Operação", "📥 Importar B3"])
+
+                with st_cad:
+                    st.write("### Cadastro Global de Ativos")
+                    st.caption("Cadastre o ticker uma única vez para que ele fique disponível para todos.")
+                    with st.form("form_novo_ativo", clear_on_submit=True):
+                        c1, c2 = st.columns(2)
+                        ticker = c1.text_input("Ticker (Ex: PETR4)").upper().strip()
+                        nome_empresa = c2.text_input("Nome da Empresa/Fundo")
+                        tipo_ativo = c1.selectbox("Classe", ["Ação", "FII", "ETF", "Tesouro", "Cripto", "BDR"])
+                        setor_ativo = c2.selectbox("Setor", ["Bancos", "Energia", "Varejo", "Saúde", "Tecnologia",
+                                                             "Commodities", "Imobiliário", "Saneamento", "Outros"])
+
+                        if st.form_submit_button("✅ Salvar Ativo"):
+                            if ticker and nome_empresa:
+                                # INSERT OR IGNORE evita erro se o ticker já existir
+                                executar_query(
+                                    "INSERT OR IGNORE INTO ativos (ticker, nome, tipo, setor) VALUES (?,?,?,?)",
+                                    (ticker, nome_empresa, tipo_ativo, setor_ativo))
+                                st.success(f"Ativo {ticker} cadastrado com sucesso!")
+                            else:
+                                st.error("Preencha o Ticker e o Nome da Empresa.")
+
+                with st_trans:
+                    st.write("### Registrar Compra ou Venda")
+                    df_ativos_disp = ler_dados("ativos")
+
+                    if not df_ativos_disp.empty:
+                        with st.form("form_trans_invest", clear_on_submit=True):
+                            c1, c2 = st.columns(2)
+                            data_op = c1.date_input("Data da Operação", pd.Timestamp.now())
+                            ativo_sel = c1.selectbox("Selecione o Ativo", sorted(df_ativos_disp['ticker'].unique()))
+                            tipo_op = c2.radio("Tipo de Operação", ["Compra", "Venda"], horizontal=True)
+                            qtd = c2.number_input("Quantidade", min_value=0.000001, step=0.01, format="%.6f")
+                            preco_un = c2.number_input("Preço Unitário (R$)", min_value=0.01, step=0.01, format="%.2f")
+                            corretora = st.text_input("Corretora", value="Manual")
+
+                            if st.form_submit_button("🚀 Confirmar Lançamento"):
+                                executar_query("""
+                                    INSERT INTO transacoes_invest 
+                                    (usuario_id, data, ativo, quantidade, preco_unitario, tipo_operacao, corretora) 
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (usuario_atual, data_op, ativo_sel, qtd, preco_un, tipo_op, corretora))
+                                st.success(f"{tipo_op} de {ativo_sel} registrada com sucesso!")
+                                st.rerun()
+                    else:
+                        st.warning("⚠️ Cadastre os ativos na aba 'Novo Ativo' primeiro.")
+
+                    # --- AGORA FORA DO ELSE (INDENTAÇÃO CORRIGIDA) ---
+                    st.divider()
+                    with st.expander("🔍 Visualizar e Ajustar Lançamentos", expanded=True):
+                        st.write("### Histórico de Operações")
+                        st.caption("Você pode editar os valores diretamente na tabela e clicar em 'Salvar Alterações'.")
+
+                        df_ops = ler_dados("transacoes_invest")
+
+                        if not df_ops.empty:
+                            df_user_ops = df_ops[df_ops['usuario_id'] == usuario_atual].copy()
+
+                            if not df_user_ops.empty:
+                                # 1. Tabela Editável
+                                df_editavel = st.data_editor(
+                                    df_user_ops.sort_values(by='data', ascending=False),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    column_config={
+                                        "id": st.column_config.NumberColumn("ID", disabled=True),
+                                        "usuario_id": None,
+                                        "data": st.column_config.DateColumn("Data"),
+                                        "quantidade": st.column_config.NumberColumn("Qtd", format="%.6f"),
+                                        "preco_unitario": st.column_config.NumberColumn("Preço (R$)", format="%.2f"),
+                                    },
+                                    key="editor_investimentos"
+                                )
+
+                                col_btn1, col_btn2 = st.columns(2)
+
+                                # 2. Lógica para SALVAR EDIÇÕES
+                                with col_btn1:
+                                    if st.button("💾 Salvar Alterações"):
+                                        for index, row in df_editavel.iterrows():
+                                            executar_query("""
+                                                UPDATE transacoes_invest 
+                                                SET data=?, ativo=?, quantidade=?, preco_unitario=?, tipo_operacao=?, corretora=?
+                                                WHERE id=? AND usuario_id=?
+                                            """, (row['data'], row['ativo'], row['quantidade'], row['preco_unitario'],
+                                                  row['tipo_operacao'], row['corretora'], row['id'], usuario_atual))
+                                        st.success("Todas as alterações foram salvas!")
+                                        st.rerun()
+
+                                # 3. Lógica para EXCLUIR
+                                with col_btn2:
+                                    id_ajuste = st.number_input("ID para remover", min_value=0, step=1,
+                                                                key="id_del_invest")
+                                    if st.button("🗑️ Excluir Registro"):
+                                        if id_ajuste > 0:
+                                            executar_query("DELETE FROM transacoes_invest WHERE id=? AND usuario_id=?",
+                                                           (id_ajuste, usuario_atual))
+                                            st.warning(f"Operação ID {id_ajuste} removida!")
+                                            st.rerun()
+                            else:
+                                st.info("Você ainda não possui transações registradas.")
+                        else:
+                            st.info("Nenhuma transação encontrada no banco de dados.")
